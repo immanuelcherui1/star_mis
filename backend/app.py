@@ -3,7 +3,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from flask_restful import Api, Resource
 from models import Staff, AdvanceLoan, Client, CoatMeasurement, RegularShirtMeasurement, SenatorShirtMeasurement, TrouserMeasurement, Inventory
-from datetime import datetime
+from datetime import datetime,timezone, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
@@ -88,7 +88,7 @@ api.add_resource(Logout, '/logout')
 class CreateStaff(Resource):
     def post(self):
         # Check if the logged-in user is Admin or CEO
-        if 'role' not in session or session['role'] not in ['ADMIN', 'CEO']:
+        if 'role' not in session or session['role'] not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized access"}), 403
 
         # Get data from request
@@ -125,7 +125,7 @@ api.add_resource(CreateStaff, '/create_staff')
 class CreateClient(Resource):
     def post(self):
         # Check if the logged-in user is Admin or CEO
-        if 'role' not in session or session['role'] not in ['ADMIN', 'CEO']:
+        if 'role' not in session and session['role'] not in ['ADMIN', 'CEO', "MANAGER"]:
             return jsonify({"message": "Unauthorized access"}), 403
 
         # Get data from request
@@ -137,7 +137,7 @@ class CreateClient(Resource):
         balance_amount = data.get('balance_amount')
         pickup_date = data.get('pickup_date')
         group_name = data.get('group_name')
-        created_by = data.get('created_by')  # This should be the ID of the admin/ceo who is currently on session
+        created_by = data.get('created_by')  # This should be the ID of the admin/ceo/manager who is currently on session
         password = data.get('password')
 
         # Check if the email already exists
@@ -146,7 +146,7 @@ class CreateClient(Resource):
 
         # Check if created_by exists and is an Admin or CEO
         creator = Staff.query.get(created_by)
-        if not creator or creator.role not in ['ADMIN', 'CEO']:
+        if not creator or creator.role not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized creator"}), 403
 
         # Hash the password before storing
@@ -225,7 +225,7 @@ class StaffResource(Resource):
         return jsonify(staff_data)
 
     def patch(self, id):
-        if 'user_id' not in session or session.get('role') not in ['ADMIN', 'CEO']:
+        if 'user_id' not in session or session.get('role') not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized"}), 401
 
         staff = Staff.query.get(id)
@@ -251,7 +251,7 @@ class StaffResource(Resource):
         return jsonify({"message": "Staff updated successfully"})
 
     def delete(self, id):
-        if 'user_id' not in session or session.get('role') not in ['ADMIN', 'CEO']:
+        if 'user_id' not in session or session.get('role') not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized"}), 401
 
         staff = Staff.query.get(id)
@@ -269,7 +269,7 @@ api.add_resource(StaffResource, '/staff/<int:id>')
 # Client routes
 class ClientList(Resource):
     def get(self):
-        if 'user_id' not in session and session.get('role') not in ['ADMIN', 'CEO']:
+        if 'user_id' not in session and session.get('role') not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized"}), 401
 
         clients = Client.query.all()
@@ -345,7 +345,7 @@ class ClientResource(Resource):
         return jsonify(client_data)
 
     def patch(self, id):
-        if 'user_id' not in session and session.get('role') not in ['ADMIN', 'CEO']:
+        if 'user_id' not in session and session.get('role') not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized"}), 401
 
         client = Client.query.get(id)
@@ -369,7 +369,7 @@ class ClientResource(Resource):
         return jsonify({"message": "Client updated successfully"})
 
     def delete(self, id):
-        if 'user_id' not in session and session.get('role') not in ['ADMIN', 'CEO']:
+        if 'user_id' not in session and session.get('role') not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized"}), 401
 
         client = Client.query.get(id)
@@ -387,7 +387,7 @@ api.add_resource(ClientResource, '/client/<int:id>')
 # Advance Loan routes
 class AdvanceLoanList(Resource):
     def get(self):
-        if 'user_id' not in session and session.get('role') not in ['ADMIN', 'CEO', "MANAGER"]:
+        if 'user_id' not in session and session.get('role') not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized"}), 401
 
         loans = AdvanceLoan.query.all()
@@ -470,6 +470,12 @@ class AdvanceLoanResource(Resource):
         if not loan:
             return jsonify({"message": "Loan not found"}), 404
         
+        # Ensure the loan was taken less than 10 minutes ago
+        current_time = datetime.now(timezone.utc)
+        time_difference = current_time - loan.date_taken
+        if time_difference > timedelta(minutes=10):
+            return jsonify({"message": "Loan can no longer be updated"}), 403
+        
         data = request.get_json()
         if 'loan_amount' in data:
             loan.loan_amount = data['loan_amount']
@@ -481,7 +487,7 @@ class AdvanceLoanResource(Resource):
         return jsonify({"message": "Loan updated successfully"})
 
     def delete(self, id):
-        if 'user_id' not in session or session.get('role') not in ['ADMIN', 'CEO']:
+        if 'user_id' not in session or session.get('role') not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized"}), 401
 
         loan = AdvanceLoan.query.get(id)
@@ -496,236 +502,335 @@ class AdvanceLoanResource(Resource):
 api.add_resource(AdvanceLoanResource, '/advance_loan/<int:id>')
 
 
-# Measurement routes (Coat, Shirt, Trouser)
 class CoatMeasurementList(Resource):
     def get(self):
+        # Ensure the user is authenticated
         if 'user_id' not in session:
             return jsonify({"message": "Unauthorized"}), 401
 
+        # Fetch all coat measurements
         measurements = CoatMeasurement.query.all()
         measurement_list = []
         for m in measurements:
+            # Match fields from the model
             measurement_data = {
                 'id': m.id,
-                'client_id': m.client_id,
-                'chest': m.chest,
-                'waist': m.waist,
-                'hips': m.hips,
-                'length': m.length,
-                'sleeve': m.sleeve,
+                'fabric': m.fabric,
+                'shoulder': float(m.shoulder) if m.shoulder else None,
+                'sleeves': float(m.sleeves) if m.sleeves else None,
+                'chest': float(m.chest) if m.chest else None,
+                'waist': float(m.waist) if m.waist else None,
+                'arm': float(m.arm) if m.arm else None,
+                'full_length': float(m.full_length) if m.full_length else None,
+                'bottom_length': float(m.bottom_length) if m.bottom_length else None,
+                'description': m.description,
+                'status': m.status,
+                'client': m.client,
+                'assigned_to': m.assigned_to,
+                'created_by': m.created_by,
                 'date_created': m.date_created
             }
             measurement_list.append(measurement_data)
 
         return jsonify(measurement_list)
 
-    def post(self):
-        if 'user_id' not in session:
-            return jsonify({"message": "Unauthorized"}), 401
+    # def post(self):
+    #     # Ensure the user is authenticated
+    #     if 'user_id' not in session:
+    #         return jsonify({"message": "Unauthorized"}), 401
 
-        data = request.get_json()
-        client_id = data['client_id']
-        chest = data['chest']
-        waist = data['waist']
-        hips = data['hips']
-        length = data['length']
-        sleeve = data['sleeve']
+    #     # Parse and validate input data
+    #     data = request.get_json()
+    #     required_fields = ['fabric', 'client']
+    #     for field in required_fields:
+    #         if field not in data:
+    #             return jsonify({"message": f"'{field}' is required"}), 400
 
-        new_measurement = CoatMeasurement(
-            client_id=client_id,
-            chest=chest,
-            waist=waist,
-            hips=hips,
-            length=length,
-            sleeve=sleeve,
-            date_created=datetime.now()
-        )
+    #     # Extract and assign data to the new measurement
+    #     new_measurement = CoatMeasurement(
+    #         fabric=data['fabric'],
+    #         shoulder=data.get('shoulder'),
+    #         sleeves=data.get('sleeves'),
+    #         chest=data.get('chest'),
+    #         waist=data.get('waist'),
+    #         arm=data.get('arm'),
+    #         full_length=data.get('full_length'),
+    #         bottom_length=data.get('bottom_length'),
+    #         description=data.get('description'),
+    #         status=data.get('status', 'booked'),  # Default status if not provided
+    #         client=data['client'],
+    #         assigned_to=data.get('assigned_to'),
+    #         created_by=session['user_id'],  # Assuming the session contains the creator's ID
+    #         date_created=datetime.now(timezone.utc)
+    #     )
 
-        db.session.add(new_measurement)
-        db.session.commit()
+    #     # Save to the database
+    #     db.session.add(new_measurement)
+    #     db.session.commit()
 
-        return jsonify({"message": "Coat measurement added successfully"}), 201
+    #     return jsonify({"message": "Coat measurement added successfully", "id": new_measurement.id}), 201
 
+
+# Add the resource to the API
 api.add_resource(CoatMeasurementList, '/coat_measurements')
+
 
 class CoatMeasurementResource(Resource):
     def get(self, id):
+        # Ensure the user is authenticated
         if 'user_id' not in session:
             return jsonify({"message": "Unauthorized"}), 401
 
+        # Fetch the coat measurement by ID
         measurement = CoatMeasurement.query.get(id)
         if not measurement:
             return jsonify({"message": "Measurement not found"}), 404
         
+        # Construct the response data
         measurement_data = {
             'id': measurement.id,
-            'client_id': measurement.client_id,
-            'chest': measurement.chest,
-            'waist': measurement.waist,
-            'hips': measurement.hips,
-            'length': measurement.length,
-            'sleeve': measurement.sleeve,
+            'fabric': measurement.fabric,
+            'shoulder': float(measurement.shoulder) if measurement.shoulder else None,
+            'sleeves': float(measurement.sleeves) if measurement.sleeves else None,
+            'chest': float(measurement.chest) if measurement.chest else None,
+            'waist': float(measurement.waist) if measurement.waist else None,
+            'arm': float(measurement.arm) if measurement.arm else None,
+            'full_length': float(measurement.full_length) if measurement.full_length else None,
+            'bottom_length': float(measurement.bottom_length) if measurement.bottom_length else None,
+            'description': measurement.description,
+            'status': measurement.status,
+            'client': measurement.client,
+            'assigned_to': measurement.assigned_to,
+            'created_by': measurement.created_by,
             'date_created': measurement.date_created
         }
 
         return jsonify(measurement_data)
 
     def patch(self, id):
-        if 'user_id' not in session:
+        # Ensure the user is authenticated
+        if 'user_id' not in session and session.get('role') not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized"}), 401
 
+        # Fetch the coat measurement by ID
         measurement = CoatMeasurement.query.get(id)
         if not measurement:
             return jsonify({"message": "Measurement not found"}), 404
         
+        # Get the request data
         data = request.get_json()
+
+        # Update fields if they are provided in the request
+        if 'fabric' in data:
+            measurement.fabric = data['fabric']
+        if 'shoulder' in data:
+            measurement.shoulder = data['shoulder']
+        if 'sleeves' in data:
+            measurement.sleeves = data['sleeves']
         if 'chest' in data:
             measurement.chest = data['chest']
         if 'waist' in data:
             measurement.waist = data['waist']
-        if 'hips' in data:
-            measurement.hips = data['hips']
-        if 'length' in data:
-            measurement.length = data['length']
-        if 'sleeve' in data:
-            measurement.sleeve = data['sleeve']
+        if 'arm' in data:
+            measurement.arm = data['arm']
+        if 'full_length' in data:
+            measurement.full_length = data['full_length']
+        if 'bottom_length' in data:
+            measurement.bottom_length = data['bottom_length']
+        if 'description' in data:
+            measurement.description = data['description']
+        if 'status' in data:
+            measurement.status = data['status']
+        if 'assigned_to' in data:
+            measurement.assigned_to = data['assigned_to']
 
+        # Commit the changes
         db.session.commit()
 
         return jsonify({"message": "Coat measurement updated successfully"})
 
     def delete(self, id):
-        if 'user_id' not in session or session.get('role') not in ['ADMIN', 'CEO']:
+        # Ensure the user is authenticated and authorized
+        if 'user_id' not in session and session.get('role') not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized"}), 401
 
+        # Fetch the coat measurement by ID
         measurement = CoatMeasurement.query.get(id)
         if not measurement:
             return jsonify({"message": "Measurement not found"}), 404
         
+        # Delete the record
         db.session.delete(measurement)
         db.session.commit()
 
         return jsonify({"message": "Coat measurement deleted successfully"})
 
+# Add the resource to the API
 api.add_resource(CoatMeasurementResource, '/coat_measurement/<int:id>')
 
-
-# RegularShirtMeasurement routes
 class RegularShirtMeasurementList(Resource):
     def get(self):
+        # Ensure the user is authenticated
         if 'user_id' not in session:
             return jsonify({"message": "Unauthorized"}), 401
 
+        # Fetch all regular shirt measurements
         measurements = RegularShirtMeasurement.query.all()
         measurement_list = []
         for m in measurements:
+            # Match fields from the model
             measurement_data = {
                 'id': m.id,
-                'client_id': m.client_id,
-                'chest': m.chest,
-                'waist': m.waist,
-                'hips': m.hips,
-                'sleeve_length': m.sleeve_length,
-                'collar': m.collar,
+                'fabric': m.fabric,
+                'shoulder': float(m.shoulder) if m.shoulder else None,
+                'sleeves': float(m.sleeves) if m.sleeves else None,
+                'chest': float(m.chest) if m.chest else None,
+                'waist': float(m.waist) if m.waist else None,
+                'arm': float(m.arm) if m.arm else None,
+                'full_length': float(m.full_length) if m.full_length else None,
+                'bottom_length': float(m.bottom_length) if m.bottom_length else None,
+                'description': m.description,
+                'status': m.status,
+                'client': m.client,
+                'assigned_to': m.assigned_to,
+                'created_by': m.created_by,
                 'date_created': m.date_created
             }
             measurement_list.append(measurement_data)
 
         return jsonify(measurement_list)
 
-    def post(self):
-        if 'user_id' not in session:
-            return jsonify({"message": "Unauthorized"}), 401
+    # def post(self):
+    #     # Ensure the user is authenticated
+    #     if 'user_id' not in session:
+    #         return jsonify({"message": "Unauthorized"}), 401
 
-        data = request.get_json()
-        client_id = data['client_id']
-        chest = data['chest']
-        waist = data['waist']
-        hips = data['hips']
-        sleeve_length = data['sleeve_length']
-        collar = data['collar']
+    #     # Parse and validate input data
+    #     data = request.get_json()
+    #     required_fields = ['fabric', 'client']
+    #     for field in required_fields:
+    #         if field not in data:
+    #             return jsonify({"message": f"'{field}' is required"}), 400
 
-        new_measurement = RegularShirtMeasurement(
-            client_id=client_id,
-            chest=chest,
-            waist=waist,
-            hips=hips,
-            sleeve_length=sleeve_length,
-            collar=collar,
-            date_created=datetime.now()
-        )
+    #     # Extract and assign data to the new measurement
+    #     new_measurement = RegularShirtMeasurement(
+    #         fabric=data['fabric'],
+    #         shoulder=data.get('shoulder'),
+    #         sleeves=data.get('sleeves'),
+    #         chest=data.get('chest'),
+    #         waist=data.get('waist'),
+    #         arm=data.get('arm'),
+    #         full_length=data.get('full_length'),
+    #         bottom_length=data.get('bottom_length'),
+    #         description=data.get('description'),
+    #         status=data.get('status', 'booked'),  # Default status if not provided
+    #         client=data['client'],
+    #         assigned_to=data.get('assigned_to'),
+    #         created_by=session['user_id'],  # Assuming the session contains the creator's ID
+    #         date_created=datetime.now(timezone.utc)
+    #     )
 
-        db.session.add(new_measurement)
-        db.session.commit()
+    #     # Save to the database
+    #     db.session.add(new_measurement)
+    #     db.session.commit()
 
-        return jsonify({"message": "Regular shirt measurement added successfully"}), 201
+    #     return jsonify({"message": "Regular shirt measurement added successfully", "id": new_measurement.id}), 201
 
+
+# Add the resource to the API
 api.add_resource(RegularShirtMeasurementList, '/regular_shirt_measurements')
-
 
 class RegularShirtMeasurementResource(Resource):
     def get(self, id):
+        # Ensure the user is authenticated
         if 'user_id' not in session:
             return jsonify({"message": "Unauthorized"}), 401
 
+        # Fetch the specific measurement by ID
         measurement = RegularShirtMeasurement.query.get(id)
         if not measurement:
             return jsonify({"message": "Measurement not found"}), 404
-        
+
+        # Serialize measurement data
         measurement_data = {
             'id': measurement.id,
-            'client_id': measurement.client_id,
-            'chest': measurement.chest,
-            'waist': measurement.waist,
-            'hips': measurement.hips,
-            'sleeve_length': measurement.sleeve_length,
-            'collar': measurement.collar,
+            'fabric': measurement.fabric,
+            'shoulder': float(measurement.shoulder) if measurement.shoulder else None,
+            'sleeves': float(measurement.sleeves) if measurement.sleeves else None,
+            'chest': float(measurement.chest) if measurement.chest else None,
+            'waist': float(measurement.waist) if measurement.waist else None,
+            'arm': float(measurement.arm) if measurement.arm else None,
+            'full_length': float(measurement.full_length) if measurement.full_length else None,
+            'bottom_length': float(measurement.bottom_length) if measurement.bottom_length else None,
+            'description': measurement.description,
+            'status': measurement.status,
+            'client': measurement.client,
+            'assigned_to': measurement.assigned_to,
+            'created_by': measurement.created_by,
             'date_created': measurement.date_created
         }
 
         return jsonify(measurement_data)
 
     def patch(self, id):
-        if 'user_id' not in session:
+        # Ensure the user is authenticated
+        if 'user_id' not in session and session.get('role') not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized"}), 401
 
+        # Fetch the specific measurement by ID
         measurement = RegularShirtMeasurement.query.get(id)
         if not measurement:
             return jsonify({"message": "Measurement not found"}), 404
-        
+
+        # Parse and apply updates
         data = request.get_json()
+        if 'fabric' in data:
+            measurement.fabric = data['fabric']
+        if 'shoulder' in data:
+            measurement.shoulder = data['shoulder']
+        if 'sleeves' in data:
+            measurement.sleeves = data['sleeves']
         if 'chest' in data:
             measurement.chest = data['chest']
         if 'waist' in data:
             measurement.waist = data['waist']
-        if 'hips' in data:
-            measurement.hips = data['hips']
-        if 'sleeve_length' in data:
-            measurement.sleeve_length = data['sleeve_length']
-        if 'collar' in data:
-            measurement.collar = data['collar']
+        if 'arm' in data:
+            measurement.arm = data['arm']
+        if 'full_length' in data:
+            measurement.full_length = data['full_length']
+        if 'bottom_length' in data:
+            measurement.bottom_length = data['bottom_length']
+        if 'description' in data:
+            measurement.description = data['description']
+        if 'status' in data:
+            measurement.status = data['status']
+        if 'assigned_to' in data:
+            measurement.assigned_to = data['assigned_to']
 
         db.session.commit()
 
         return jsonify({"message": "Regular shirt measurement updated successfully"})
 
     def delete(self, id):
+        # Ensure the user is authenticated and authorized
         if 'user_id' not in session or session.get('role') not in ['ADMIN', 'CEO']:
             return jsonify({"message": "Unauthorized"}), 401
 
+        # Fetch the specific measurement by ID
         measurement = RegularShirtMeasurement.query.get(id)
         if not measurement:
             return jsonify({"message": "Measurement not found"}), 404
-        
+
+        # Delete the measurement
         db.session.delete(measurement)
         db.session.commit()
 
         return jsonify({"message": "Regular shirt measurement deleted successfully"})
 
+
+# Add the resource to the API
 api.add_resource(RegularShirtMeasurementResource, '/regular_shirt_measurement/<int:id>')
 
-
-# SenatorShirtMeasurement routes
 class SenatorShirtMeasurementList(Resource):
     def get(self):
         if 'user_id' not in session:
@@ -736,47 +841,61 @@ class SenatorShirtMeasurementList(Resource):
         for m in measurements:
             measurement_data = {
                 'id': m.id,
-                'client_id': m.client_id,
-                'chest': m.chest,
-                'waist': m.waist,
-                'hips': m.hips,
-                'sleeve_length': m.sleeve_length,
-                'collar': m.collar,
-                'neck': m.neck,
+                'fabric': m.fabric,
+                'shoulder': float(m.shoulder) if m.shoulder else None,
+                'sleeves': float(m.sleeves) if m.sleeves else None,
+                'chest': float(m.chest) if m.chest else None,
+                'waist': float(m.waist) if m.waist else None,
+                'arm': float(m.arm) if m.arm else None,
+                'full_length': float(m.full_length) if m.full_length else None,
+                'bottom_length': float(m.bottom_length) if m.bottom_length else None,
+                'neck': float(m.neck) if m.neck else None,
+                'wrist': float(m.wrist) if m.wrist else None,
+                'description': m.description,
+                'status': m.status,
+                'client': m.client,
+                'assigned_to': m.assigned_to,
+                'created_by': m.created_by,
                 'date_created': m.date_created
             }
             measurement_list.append(measurement_data)
 
         return jsonify(measurement_list)
-
+    
     def post(self):
         if 'user_id' not in session:
             return jsonify({"message": "Unauthorized"}), 401
 
         data = request.get_json()
-        client_id = data['client_id']
-        chest = data['chest']
-        waist = data['waist']
-        hips = data['hips']
-        sleeve_length = data['sleeve_length']
-        collar = data['collar']
-        neck = data['neck']
+
+        # Validate required fields
+        if 'fabric' not in data or 'client' not in data or 'created_by' not in data:
+            return jsonify({"message": "Missing required fields: fabric, client, and created_by"}), 400
 
         new_measurement = SenatorShirtMeasurement(
-            client_id=client_id,
-            chest=chest,
-            waist=waist,
-            hips=hips,
-            sleeve_length=sleeve_length,
-            collar=collar,
-            neck=neck,
-            date_created=datetime.now()
+            fabric=data['fabric'],
+            shoulder=data.get('shoulder'),
+            sleeves=data.get('sleeves'),
+            chest=data.get('chest'),
+            waist=data.get('waist'),
+            arm=data.get('arm'),
+            full_length=data.get('full_length'),
+            bottom_length=data.get('bottom_length'),
+            neck=data.get('neck'),
+            wrist=data.get('wrist'),
+            description=data.get('description'),
+            status=data.get('status', 'booked'),
+            client=data['client'],
+            assigned_to=data.get('assigned_to'),
+            created_by=data['created_by'],
+            date_created=datetime.now(timezone.utc)
         )
 
         db.session.add(new_measurement)
         db.session.commit()
 
         return jsonify({"message": "Senator shirt measurement added successfully"}), 201
+
 
 api.add_resource(SenatorShirtMeasurementList, '/senator_shirt_measurements')
 
@@ -844,8 +963,6 @@ class SenatorShirtMeasurementResource(Resource):
 
 api.add_resource(SenatorShirtMeasurementResource, '/senator_shirt_measurement/<int:id>')
 
-
-# TrouserMeasurement routes
 class TrouserMeasurementList(Resource):
     def get(self):
         if 'user_id' not in session:
@@ -856,41 +973,55 @@ class TrouserMeasurementList(Resource):
         for m in measurements:
             measurement_data = {
                 'id': m.id,
-                'client_id': m.client_id,
-                'waist': m.waist,
-                'hips': m.hips,
-                'inseam': m.inseam,
-                'outseam': m.outseam,
+                'fabric': m.fabric,
+                'waist': float(m.waist) if m.waist else None,
+                'thigh': float(m.thigh) if m.thigh else None,
+                'knee': float(m.knee) if m.knee else None,
+                'bottom': float(m.bottom) if m.bottom else None,
+                'fly': float(m.fly) if m.fly else None,
+                'hips': float(m.hips) if m.hips else None,
+                'description': m.description,
+                'status': m.status,
+                'client': m.client,
+                'assigned_to': m.assigned_to,
+                'created_by': m.created_by,
                 'date_created': m.date_created
             }
             measurement_list.append(measurement_data)
 
         return jsonify(measurement_list)
-
+    
     def post(self):
         if 'user_id' not in session:
             return jsonify({"message": "Unauthorized"}), 401
 
         data = request.get_json()
-        client_id = data['client_id']
-        waist = data['waist']
-        hips = data['hips']
-        inseam = data['inseam']
-        outseam = data['outseam']
+
+        # Validate required fields
+        if 'fabric' not in data or 'client' not in data or 'created_by' not in data:
+            return jsonify({"message": "Missing required fields: fabric, client, and created_by"}), 400
 
         new_measurement = TrouserMeasurement(
-            client_id=client_id,
-            waist=waist,
-            hips=hips,
-            inseam=inseam,
-            outseam=outseam,
-            date_created=datetime.now()
+            fabric=data['fabric'],
+            waist=data.get('waist'),
+            thigh=data.get('thigh'),
+            knee=data.get('knee'),
+            bottom=data.get('bottom'),
+            fly=data.get('fly'),
+            hips=data.get('hips'),
+            description=data.get('description'),
+            status=data.get('status', 'booked'),
+            client=data['client'],
+            assigned_to=data.get('assigned_to'),
+            created_by=data['created_by'],
+            date_created=datetime.now(timezone.utc)
         )
 
         db.session.add(new_measurement)
         db.session.commit()
 
         return jsonify({"message": "Trouser measurement added successfully"}), 201
+
 
 api.add_resource(TrouserMeasurementList, '/trouser_measurements')
 
@@ -903,152 +1034,172 @@ class TrouserMeasurementResource(Resource):
         measurement = TrouserMeasurement.query.get(id)
         if not measurement:
             return jsonify({"message": "Measurement not found"}), 404
-        
+
         measurement_data = {
             'id': measurement.id,
-            'client_id': measurement.client_id,
-            'waist': measurement.waist,
-            'hips': measurement.hips,
-            'inseam': measurement.inseam,
-            'outseam': measurement.outseam,
+            'fabric': measurement.fabric,
+            'waist': float(measurement.waist) if measurement.waist else None,
+            'thigh': float(measurement.thigh) if measurement.thigh else None,
+            'knee': float(measurement.knee) if measurement.knee else None,
+            'bottom': float(measurement.bottom) if measurement.bottom else None,
+            'fly': float(measurement.fly) if measurement.fly else None,
+            'hips': float(measurement.hips) if measurement.hips else None,
+            'description': measurement.description,
+            'status': measurement.status,
+            'client': measurement.client,
+            'assigned_to': measurement.assigned_to,
+            'created_by': measurement.created_by,
             'date_created': measurement.date_created
         }
 
         return jsonify(measurement_data)
 
     def patch(self, id):
-        if 'user_id' not in session:
+        if 'user_id' not in session and session.get('role') not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized"}), 401
 
         measurement = TrouserMeasurement.query.get(id)
         if not measurement:
             return jsonify({"message": "Measurement not found"}), 404
-        
+
         data = request.get_json()
+        if 'fabric' in data:
+            measurement.fabric = data['fabric']
         if 'waist' in data:
             measurement.waist = data['waist']
+        if 'thigh' in data:
+            measurement.thigh = data['thigh']
+        if 'knee' in data:
+            measurement.knee = data['knee']
+        if 'bottom' in data:
+            measurement.bottom = data['bottom']
+        if 'fly' in data:
+            measurement.fly = data['fly']
         if 'hips' in data:
             measurement.hips = data['hips']
-        if 'inseam' in data:
-            measurement.inseam = data['inseam']
-        if 'outseam' in data:
-            measurement.outseam = data['outseam']
+        if 'description' in data:
+            measurement.description = data['description']
+        if 'status' in data:
+            measurement.status = data['status']
+        if 'assigned_to' in data:
+            measurement.assigned_to = data['assigned_to']
 
         db.session.commit()
 
         return jsonify({"message": "Trouser measurement updated successfully"})
 
     def delete(self, id):
-        if 'user_id' not in session or session.get('role') not in ['ADMIN', 'CEO']:
+        if 'user_id' not in session and session.get('role') not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized"}), 401
 
         measurement = TrouserMeasurement.query.get(id)
         if not measurement:
             return jsonify({"message": "Measurement not found"}), 404
-        
+
         db.session.delete(measurement)
         db.session.commit()
 
         return jsonify({"message": "Trouser measurement deleted successfully"})
 
+
 api.add_resource(TrouserMeasurementResource, '/trouser_measurement/<int:id>')
 
-# Inventory routes
+# Inventory
 class InventoryList(Resource):
     def get(self):
-        if 'user_id' not in session or session.get('role') not in ['ADMIN', 'CEO']:
+        if 'user_id' not in session:
             return jsonify({"message": "Unauthorized"}), 401
 
-        inventory_items = Inventory.query.all()
+        inventories = Inventory.query.all()
         inventory_list = []
-        for item in inventory_items:
-            item_data = {
-                'id': item.id,
-                'item_name': item.item_name,
-                'quantity': item.quantity,
-                'cost': item.cost,
-                'status': item.status,
-                'date_added': item.date_added
+        for inventory in inventories:
+            inventory_data = {
+                'id': inventory.id,
+                'item_name': inventory.item_name,
+                'quantity': inventory.quantity,
+                'description': inventory.description,
+                'created_by': inventory.created_by,
+                'date_created': inventory.date_created
             }
-            inventory_list.append(item_data)
+            inventory_list.append(inventory_data)
 
         return jsonify(inventory_list)
 
     def post(self):
-        if 'user_id' not in session:
+        if 'user_id' not in session and session.get('role') not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized"}), 401
 
         data = request.get_json()
-        item_name = data['item_name']
-        quantity = data['quantity']
-        cost = data['cost']
-        status = data['status']
 
-        new_item = Inventory(
-            item_name=item_name,
-            quantity=quantity,
-            cost=cost,
-            status=status,
-            date_added=datetime.now()
+        # Validate required fields
+        if 'item_name' not in data or 'quantity' not in data or 'created_by' not in data:
+            return jsonify({"message": "Missing required fields: item_name, quantity, and created_by"}), 400
+
+        new_inventory = Inventory(
+            item_name=data['item_name'],
+            quantity=data['quantity'],
+            description=data.get('description'),
+            created_by=data['created_by'],
+            date_created=datetime.now(timezone.utc)
         )
 
-        db.session.add(new_item)
+        db.session.add(new_inventory)
         db.session.commit()
 
         return jsonify({"message": "Inventory item added successfully"}), 201
-
-api.add_resource(InventoryList, '/inventory')
-
+    
+api.add_resource(InventoryList, '/inventories')
 
 class InventoryResource(Resource):
     def get(self, id):
         if 'user_id' not in session:
             return jsonify({"message": "Unauthorized"}), 401
 
-        item = Inventory.query.get(id)
-        if not item:
-            return jsonify({"message": "Item not found"}), 404
+        inventory = Inventory.query.get(id)
+        if not inventory:
+            return jsonify({"message": "Inventory item not found"}), 404
 
-        item_data = {
-            'id': item.id,
-            'item_name': item.item_name,
-            'quantity': item.quantity,
-            'cost': item.cost,
-            'status': item.status,
-            'date_added': item.date_added
+        inventory_data = {
+            'id': inventory.id,
+            'item_name': inventory.item_name,
+            'quantity': inventory.quantity,
+            'description': inventory.description,
+            'created_by': inventory.created_by,
+            'date_created': inventory.date_created
         }
 
-        return jsonify(item_data)
+        return jsonify(inventory_data)
 
     def patch(self, id):
-        if 'user_id' not in session:
+        if 'user_id' not in session and session.get('role') not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized"}), 401
 
-        item = Inventory.query.get(id)
-        if not item:
-            return jsonify({"message": "Item not found"}), 404
+        inventory = Inventory.query.get(id)
+        if not inventory:
+            return jsonify({"message": "Inventory item not found"}), 404
 
         data = request.get_json()
+
+        if 'item_name' in data:
+            inventory.item_name = data['item_name']
         if 'quantity' in data:
-            item.quantity = data['quantity']
-        if 'cost' in data:
-            item.cost = data['cost']
-        if 'status' in data:
-            item.status = data['status']
+            inventory.quantity = data['quantity']
+        if 'description' in data:
+            inventory.description = data['description']
 
         db.session.commit()
 
         return jsonify({"message": "Inventory item updated successfully"})
 
     def delete(self, id):
-        if 'user_id' not in session or session.get('role') not in ['ADMIN', 'CEO']:
+        if 'user_id' not in session and session.get('role') not in ['ADMIN', 'CEO', 'MANAGER']:
             return jsonify({"message": "Unauthorized"}), 401
 
-        item = Inventory.query.get(id)
-        if not item:
-            return jsonify({"message": "Item not found"}), 404
-        
-        db.session.delete(item)
+        inventory = Inventory.query.get(id)
+        if not inventory:
+            return jsonify({"message": "Inventory item not found"}), 404
+
+        db.session.delete(inventory)
         db.session.commit()
 
         return jsonify({"message": "Inventory item deleted successfully"})
